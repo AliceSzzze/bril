@@ -1,0 +1,48 @@
+# Return the majority element (appears more than floor(n/2) times) of an array, assuming that the majority element is guaranteed to exist.
+# Inputs: an array
+# Output: the majority element of the array.
+# Not a big example in terms of the array size and the total dynamic instructions; but I found Boyer-Moore voting algorithm very interesting!
+
+# ARGS: 3 2 3
+@main(argc: int, argv: ptr<int>) {
+  zero: int = const 0;
+  one: int = const 1;
+  first_elm_ptr: ptr<int> = ptradd argv zero;
+  major_elm: int = load first_elm_ptr;
+  count: int = const 1;
+
+  i: int = const 1;
+  .check_bound:
+    end_cond: bool = ge i argc;
+    br end_cond .end .body;
+  
+  .body:
+    cur_ptr: ptr<int> = ptradd argv i;
+    cur_val: int = load cur_ptr;
+    cur_major_cond: bool = eq cur_val major_elm;
+    br cur_major_cond .incr_count .body.else;
+  
+  .incr_count:
+    count: int = add count one;
+    i: int = add i one;
+    jmp .check_bound;
+  
+  .body.else:
+    cnt_eq_0: bool = eq count zero;
+    br cnt_eq_0 .eq_zero_if .eq_zero_else;
+  
+  .eq_zero_if:
+    cur_ptr: ptr<int> = ptradd argv i;
+    major_elm: int = load cur_ptr;
+    count: int = add count one;
+    i: int = add i one;
+    jmp .check_bound;
+  
+  .eq_zero_else:
+    count: int = sub count one;
+    i: int = add i one;
+    jmp .check_bound;
+
+  .end:
+    print major_elm;
+}
