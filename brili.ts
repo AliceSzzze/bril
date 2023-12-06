@@ -885,40 +885,105 @@ function parseNumber(s: string): number {
   }
 }
 
-function parseMainArguments(expected: bril.Argument[], args: string[]) : Env {
+function parseMainArguments(expected: bril.Argument[], args: string[], heap: Heap<Value>): Env {
   let newEnv: Env = new Map();
+  
+  if (usesVariableArgsToMain(expected)) {
+    // variable args
+    // first argument to main is the number of command line arguments
+    newEnv.set(expected[0].name, BigInt(args.length));
 
-  if (args.length !== expected.length) {
-    throw error(`mismatched main argument arity: expected ${expected.length}; got ${args.length}`);
-  }
+    // allocate array for command line arguments
+    let ptr = alloc(expected[1].type, Number(args.length), heap);
 
-  for (let i = 0; i < args.length; i++) {
-    let type = expected[i].type;
-    switch (type) {
-      case "int":
-        // https://dev.to/darkmavis1980/you-should-stop-using-parseint-nbf
-        let n: bigint = BigInt(Number(args[i]));
-        newEnv.set(expected[i].name, n as Value);
-        break;
-      case "float":
-        let f: number = parseNumber(args[i]);
-        newEnv.set(expected[i].name, f as Value);
-        break;
-      case "bool":
-        let b: boolean = parseBool(args[i]);
-        newEnv.set(expected[i].name, b as Value);
-        break;
-      case "char":
-        let c: string = parseChar(args[i]);
-        newEnv.set(expected[i].name, c as Value);
-        break;
+    // make a copy of ptr to iterate through the allocated array
+    let cur = ptr;
+    
+    // parse the arguments inputted by the user according to the type of the pointer
+    for (let i = 0; i < args.length; i++) {
+      switch (expected[1].type.ptr) {
+        case "int":
+          // https://dev.to/darkmavis1980/you-should-stop-using-parseint-nbf
+          let n: bigint = BigInt(Number(args[i]));
+          heap.write(cur.loc, n);
+          break;
+        case "float":
+          let f: number = parseNumber(args[i]);
+          heap.write(cur.loc, f);
+          break;
+        case "bool":
+          let b: boolean = parseBool(args[i]);
+          heap.write(cur.loc, b);
+          break;
+        case "char":
+          let c: string = parseChar(args[i]);
+          heap.write(cur.loc, c);
+          break;
+        default:
+          throw error(
+            `unsupported argument type for main: expected all arguments to be of the same type int, float, bool or char`,
+          );
+      }
+      // move to the next entry in the allocated array
+      cur = { loc: cur.loc.add(Number(1)), type: cur.type };
+    }
+    
+    newEnv.set(expected[1].name, ptr);
+  } else {
+    if (args.length !== expected.length) {
+      throw error(`mismatched main argument arity: expected ${expected.length}; got ${args.length}`);
+    }
+
+    for (let i = 0; i < args.length; i++) {
+      let type = expected[i].type;
+      switch (type) {
+        case "int":
+          // https://dev.to/darkmavis1980/you-should-stop-using-parseint-nbf
+          let n: bigint = BigInt(Number(args[i]));
+          newEnv.set(expected[i].name, n as Value);
+          break;
+        case "float":
+          let f: number = parseNumber(args[i]);
+          newEnv.set(expected[i].name, f as Value);
+          break;
+        case "bool":
+          let b: boolean = parseBool(args[i]);
+          newEnv.set(expected[i].name, b as Value);
+          break;
+        case "char":
+          let c: string = parseChar(args[i]);
+          newEnv.set(expected[i].name, c as Value);
+          break;
+        default:
+          throw error(
+            `unsupported argument type for main: expected int, float, bool or char`,
+          );
+          break;
+      }
     }
   }
+
   return newEnv;
 }
 
+/**
+ * Checks whether main takes an argument array of variable length 
+ * allocated by the interpreter.
+ * 
+ * @param {bril.Argument[]} expected - The expected arguments of main
+ * @returns {boolean} True if main takes two arguments where the first one is an int 
+ * and the second one is a pointer. There is no restriction on the names of the 
+ * arguments or the type of the pointer, but the arguments in the array have to have
+ * the same type.
+ */
+function usesVariableArgsToMain(expected: bril.Argument[]) {
+  return expected.length == 2 &&
+  expected[0].type == "int" && 
+  typeof expected[1].type === "object" && expected[1].type.hasOwnProperty("ptr")
+} 
+
 function evalProg(prog: bril.Program) {
-  let heap = new Heap<Value>()
+  let heap = new Heap<Value>();
   let main = findFunc("main", prog.functions);
   if (main === null) {
     console.warn(`no main function defined, doing nothing`);
@@ -936,7 +1001,7 @@ function evalProg(prog: bril.Program) {
 
   // Remaining arguments are for the main function.k
   let expected = main.args || [];
-  let newEnv = parseMainArguments(expected, args);
+  let newEnv = parseMainArguments(expected, args, heap);
 
   let state: State = {
     funcs: prog.functions,
@@ -949,6 +1014,19 @@ function evalProg(prog: bril.Program) {
   }
   evalFunc(main, state);
 
+  // if the interpreter allocated an array for the arguments to main, 
+  // so it should also free it at the end of the program
+  if (usesVariableArgsToMain(expected)) {
+    let ptr = get(state.env, expected[1].name);
+    if (!ptr.hasOwnProperty("loc")) {
+      throw error(`unable to free pointer`);
+    }
+    // offset is always 0 for argument arrays allocated by the program since it is the 
+    // first ever allocation, but the offset might have changed during the program.
+    ptr.loc.offset = 0;
+    heap.free(ptr.loc);
+  }
+
   if (!heap.isEmpty()) {
     throw error(`Some memory locations have not been freed by end of execution.`);
   }
@@ -956,7 +1034,6 @@ function evalProg(prog: bril.Program) {
   if (profiling) {
     console.error(`total_dyn_inst: ${state.icount}`);
   }
-
 }
 
 async function main() {
