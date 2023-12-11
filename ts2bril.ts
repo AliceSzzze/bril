@@ -1,6 +1,7 @@
-import * as ts from 'https://esm.sh/typescript@5.0.4';
+import * as ts from 'https://esm.sh/typescript';
 import * as bril from './bril-ts/bril.ts';
 import {Builder} from './bril-ts/builder.ts';
+import { ElementAccessExpression, TypeReference } from "../../Library/Caches/deno/npm/registry.npmjs.org/typescript/5.3.3/lib/typescript.d.ts";
 
 const opTokens = new Map<ts.SyntaxKind, [bril.ValueOpCode, bril.Type]>([
   [ts.SyntaxKind.PlusToken,               ["add", "int"]],
@@ -44,6 +45,10 @@ function tsTypeToBril(tsType: ts.Type, checker: ts.TypeChecker): bril.Type {
   } else if (isTypeReference(tsType) && tsType.symbol && tsType.symbol.name === "Pointer") {
     const params = checker.getTypeArguments(tsType);
     return { ptr: tsTypeToBril(params[0], checker) };
+  } else if (checker.isArrayType(tsType)) {
+    const typeArgs = checker.getTypeArguments(tsType as TypeReference);
+    const elementType = typeArgs[0];
+    return { ptr: tsTypeToBril(elementType, checker) };
   } else {
     throw "unimplemented type " + checker.typeToString(tsType);
   }
@@ -89,21 +94,31 @@ function emitBril(prog: ts.Node, checker: ts.TypeChecker): bril.Program {
       return builder.buildValue("id", type, [ident.text]);
     }
 
-    case ts.SyntaxKind.BinaryExpression:
+    case ts.SyntaxKind.BinaryExpression: {
       let bin = expr as ts.BinaryExpression;
       let kind = bin.operatorToken.kind;
 
       // Handle assignments.
       switch (kind) {
-      case ts.SyntaxKind.EqualsToken:
-        if (!ts.isIdentifier(bin.left)) {
-          throw "assignment to non-variables unsupported";
+      case ts.SyntaxKind.EqualsToken: {
+        if (ts.isIdentifier(bin.left)) {
+          let dest = bin.left as ts.Identifier;
+          let rhs = emitExpr(bin.right);
+          let type = brilType(dest, checker);
+          return builder.buildValue("id", type, [rhs.dest], undefined, undefined, dest.text);
+        } else if (ts.isElementAccessExpression(bin.left)){
+          const elemAccess = bin.left as ElementAccessExpression;
+          // pointer to the element being accessed
+          const brilIndex = arrayIndex(elemAccess);
+
+          // store the rhs into the array 
+          builder.buildEffect("store", [brilIndex.dest, emitExpr(bin.right).dest]);
+          return builder.buildInt(0);
+        } else {
+          throw 'only assignment to variables and arrays are supported';
         }
-        let dest = bin.left as ts.Identifier;
-        let rhs = emitExpr(bin.right);
-        let type = brilType(dest, checker);
-        return builder.buildValue("id", type, [rhs.dest], undefined, undefined, dest.text);
       }
+    }
 
       // Handle "normal" value operators.
       let op: bril.ValueOpCode;
@@ -128,9 +143,9 @@ function emitBril(prog: ts.Node, checker: ts.TypeChecker): bril.Program {
       let lhs = emitExpr(bin.left);
       let rhs = emitExpr(bin.right);
       return builder.buildValue(op, type, [lhs.dest, rhs.dest]);
-
+    }
     // Support call instructions---but only for printing, for now.
-    case ts.SyntaxKind.CallExpression:
+    case ts.SyntaxKind.CallExpression: {
       let call = expr as ts.CallExpression;
       let callText = call.expression.getText();
       if (callText === "console.log") {
@@ -160,9 +175,57 @@ function emitBril(prog: ts.Node, checker: ts.TypeChecker): bril.Program {
           );
         }
       }
+    }
+
+    case ts.SyntaxKind.ArrayLiteralExpression: {
+      const array = expr as ts.ArrayLiteralExpression;
+
+      const ptrType = brilType(array, checker);
+      const len = builder.buildInt(array.elements.length);
+      const ptr = builder.buildValue("alloc", ptrType, [len.dest]);
+      // cur is used to iterate through the array and allocate elements
+      const cur = builder.buildValue("id", ptrType, [ptr.dest], undefined, undefined, "cur")
+      
+      const one = builder.buildInt(1);
+      for (let i = 0; i < array.elements.length; i++) {
+       const val = emitExpr(array.elements[i]) ;
+       builder.buildEffect("store", [cur.dest, val.dest]);
+       if (i != array.elements.length - 1) {
+        builder.buildValue("ptradd", ptrType, [cur.dest, one.dest], undefined, undefined, cur.dest);
+       }
+      }
+      
+      // return pointer to array
+      return ptr;
+    }
+
+    case ts.SyntaxKind.ElementAccessExpression: {
+      const elemAccess = expr as ts.ElementAccessExpression;
+
+      const brilIndex = arrayIndex(elemAccess);
+      const ptrType = brilIndex.type as bril.ParamType;
+      const elemType = ptrType.ptr;
+      
+      return builder.buildValue("load", elemType, [brilIndex.dest]);
+    }
+
     default:
       throw `unsupported expression kind: ${expr.getText()}`;
     }
+  }
+
+  function arrayIndex(elemAccess: ts.ElementAccessExpression) {
+      const array = elemAccess.expression;
+      const index = elemAccess.argumentExpression;
+      
+      const brilArray = emitExpr(array);
+      const lit = index as ts.NumericLiteral;
+      const val = parseInt(lit.text);
+      const brilOffset = builder.buildInt(val);
+      const ptrType = brilType(array, checker) as bril.ParamType;
+      const brilIndex = builder.buildValue("ptradd", ptrType, [brilArray.dest, brilOffset.dest]);
+      
+      return brilIndex;
   }
 
   function emit(node: ts.Node) {
@@ -264,7 +327,7 @@ function emitBril(prog: ts.Node, checker: ts.TypeChecker): bril.Program {
         break;
       }
 
-      case ts.SyntaxKind.FunctionDeclaration:
+      case ts.SyntaxKind.FunctionDeclaration: {
         let funcDef = node as ts.FunctionDeclaration;
         if (funcDef.name === undefined) {
           throw `no anonymous functions!`;
@@ -290,7 +353,7 @@ function emitBril(prog: ts.Node, checker: ts.TypeChecker): bril.Program {
         }
         builder.setCurrentFunction(mainFn);
         break;
-
+      }
       case ts.SyntaxKind.ReturnStatement: {
         let retstmt = node as ts.ReturnStatement;
         if (retstmt.expression) {
@@ -335,6 +398,13 @@ function emitBril(prog: ts.Node, checker: ts.TypeChecker): bril.Program {
       return builder.buildInt(0);
     },
 
+    // to free arrays
+    "free": (call) => {
+      const values = call.arguments.map(emitExpr);
+      builder.buildEffect("free", values.map(v => v.dest));
+      return builder.buildInt(0);
+    },
+
     "mem.ptradd": (call) => {
       let type = brilType(call, checker);
       let values = call.arguments.map(emitExpr);
@@ -368,6 +438,7 @@ async function main() {
       break;
     }
   }
+  
   if (!sf) {
     throw "source file not found";
   }
