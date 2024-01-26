@@ -983,7 +983,7 @@ function usesVariableArgsToMain(expected: bril.Argument[]) {
 } 
 
 function evalProg(prog: bril.Program) {
-  let heap = new Heap<Value>();
+  let heap = new Heap<Value>()
   let main = findFunc("main", prog.functions);
   if (main === null) {
     console.warn(`no main function defined, doing nothing`);
