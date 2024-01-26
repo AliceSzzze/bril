@@ -1,7 +1,7 @@
 import * as ts from 'https://esm.sh/typescript';
 import * as bril from './bril-ts/bril.ts';
 import {Builder} from './bril-ts/builder.ts';
-import { ElementAccessExpression, TypeReference } from "../../Library/Caches/deno/npm/registry.npmjs.org/typescript/5.3.3/lib/typescript.d.ts";
+import { ElementAccessExpression, TypeReference, isNumericLiteral } from "../../Library/Caches/deno/npm/registry.npmjs.org/typescript/5.3.3/lib/typescript.d.ts";
 
 const opTokens = new Map<ts.SyntaxKind, [bril.ValueOpCode, bril.Type]>([
   [ts.SyntaxKind.PlusToken,               ["add", "int"]],
@@ -218,13 +218,21 @@ function emitBril(prog: ts.Node, checker: ts.TypeChecker): bril.Program {
       const array = elemAccess.expression;
       const index = elemAccess.argumentExpression;
       
+      let brilOffset: bril.ValueInstruction;
       const brilArray = emitExpr(array);
-      const lit = index as ts.NumericLiteral;
-      const val = parseInt(lit.text);
-      const brilOffset = builder.buildInt(val);
+      if (brilType(index, checker) == "int") {
+        // if the index is a bigint literal
+        brilOffset = emitExpr(index);
+      } else if (brilType(index, checker) == "float"){
+        // if the index is a "number" in TypeScript, we parse it as an int 
+        const lit = index as ts.NumericLiteral;
+        const val = parseInt(lit.text);
+        brilOffset = builder.buildInt(val);
+      } else {
+        throw `Array indices must be BigInt or numeric literal. ${index.getText()} is neither.`
+      }
       const ptrType = brilType(array, checker) as bril.ParamType;
       const brilIndex = builder.buildValue("ptradd", ptrType, [brilArray.dest, brilOffset.dest]);
-      
       return brilIndex;
   }
 
